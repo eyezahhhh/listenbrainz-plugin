@@ -1,0 +1,25 @@
+{
+	"name": "listenbrainz",
+	"version": "0.1.0",
+	"description": "ListenBrainz scrobbling and playlist sync for Pipe Bomb",
+	"pipebombEntry": "dist/main.js",
+	"scripts": {
+		"build": "rimraf dist && tsc",
+		"dev": "nodemon -w src -e ts -x \"npm run build || exit 1\""
+	},
+	"type": "module",
+	"devDependencies": {
+		"@types/better-sqlite3": "^7.6.13",
+		"@types/node": "^25.5.2",
+		"nodemon": "^3.1.14",
+		"rimraf": "^6.1.3",
+		"typescript": "^6.0.2"
+	},
+	"dependencies": {
+		"@pipe-bomb/plugin-sdk": "^0.0.8",
+		"better-sqlite3": "^12.11.1"
+	},
+	"volta": {
+		"node": "24.15.0"
+	}
+}

@@ -1,0 +1,10 @@
+{
+	"plugin.listenbrainz.name": "ListenBrainz",
+	"task.plugin.listenbrainz.upload-listens.name": "Upload scrobbles",
+	"task.plugin.listenbrainz.upload-listens.subtask.all.name": "Upload all scrobbles",
+	"task.plugin.listenbrainz.upload-listens.subtask.new.name": "Upload new scrobbles",
+	"task.plugin.listenbrainz.create-playlists.name": "Create playlists",
+	"task.plugin.listenbrainz.create-playlists.subtask.loved-tracks.name": "Created loved tracks playlists",
+	"task.plugin.listenbrainz.create-playlists.subtask.recommendations.name": "Created recommendations playlists",
+	"plugin.listenbrainz.user-config.listenbrainz.name": "Authentication"
+}
