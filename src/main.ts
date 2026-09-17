@@ -1,5 +1,8 @@
+import { setDefaultResultOrder } from "node:dns";
 import type PipeBomb from "@pipe-bomb/plugin-sdk";
 import { ListenBrainzApi } from "./api.js";
+
+setDefaultResultOrder("ipv4first");
 import { ListenBrainzDb } from "./db.js";
 import { ListenBrainzUserConfig } from "./user-config.js";
 import { ListensTask, PlaylistsTask } from "./sync-task.js";
