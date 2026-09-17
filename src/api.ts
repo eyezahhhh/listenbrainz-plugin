@@ -1,4 +1,7 @@
+import { Agent } from "undici";
+
 const BASE_URL = "https://api.listenbrainz.org";
+const ipv4Agent = new Agent({ connect: { family: 4 } });
 
 export interface ListenPayload {
 	listenedAt: number;
@@ -71,6 +74,8 @@ export class ListenBrainzApi {
 				listen_type: listenType,
 				payload,
 			}),
+			// @ts-ignore
+			dispatcher: ipv4Agent,
 		});
 
 		await checkResponse(response);
@@ -86,7 +91,10 @@ export class ListenBrainzApi {
 		url.searchParams.set("count", String(count));
 		url.searchParams.set("offset", String(offset));
 
-		const response = await fetch(url.toString());
+		const response = await fetch(url.toString(), {
+			// @ts-ignore
+			dispatcher: ipv4Agent,
+		});
 		await checkResponse(response);
 
 		const data = (await response.json()) as {
@@ -120,7 +128,10 @@ export class ListenBrainzApi {
 		url.searchParams.set("count", String(count));
 		url.searchParams.set("offset", String(offset));
 
-		const response = await fetch(url.toString());
+		const response = await fetch(url.toString(), {
+			// @ts-ignore
+			dispatcher: ipv4Agent,
+		});
 		await checkResponse(response);
 
 		const data = (await response.json()) as {
@@ -145,6 +156,8 @@ export class ListenBrainzApi {
 			headers: {
 				Authorization: `Token ${token}`,
 			},
+			// @ts-ignore
+			dispatcher: ipv4Agent,
 		});
 
 		await checkResponse(response);
