@@ -1,7 +1,9 @@
-import { Agent } from "undici";
+import Axios from "axios";
 
-const BASE_URL = "https://api.listenbrainz.org";
-const ipv4Agent = new Agent({ connect: { family: 4 } });
+const axios = Axios.create({
+	baseURL: "https://api.listenbrainz.org",
+	family: 4,
+});
 
 export interface ListenPayload {
 	listenedAt: number;
@@ -26,11 +28,13 @@ interface LbListen {
 	track_metadata: LbTrackMetadata;
 }
 
-async function checkResponse(response: Response): Promise<void> {
-	if (!response.ok) {
-		const body = await response.text();
-		throw new Error(`ListenBrainz API error ${response.status}: ${body}`);
+function rethrowAxiosError(error: unknown): never {
+	if (Axios.isAxiosError(error) && error.response) {
+		throw new Error(
+			`ListenBrainz API error ${error.response.status}: ${String(error.response.data)}`,
+		);
 	}
+	throw error;
 }
 
 export class ListenBrainzApi {
@@ -64,21 +68,22 @@ export class ListenBrainzApi {
 			};
 		});
 
-		const response = await fetch(`${BASE_URL}/1/submit-listens`, {
-			method: "POST",
-			headers: {
-				Authorization: `Token ${token}`,
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({
-				listen_type: listenType,
-				payload,
-			}),
-			// @ts-ignore
-			dispatcher: ipv4Agent,
-		});
-
-		await checkResponse(response);
+		try {
+			await axios.post(
+				"/1/submit-listens",
+				{
+					listen_type: listenType,
+					payload,
+				},
+				{
+					headers: {
+						Authorization: `Token ${token}`,
+					},
+				},
+			);
+		} catch (error) {
+			rethrowAxiosError(error);
+		}
 	}
 
 	async getLovedTracks(
@@ -86,24 +91,20 @@ export class ListenBrainzApi {
 		count: number = 100,
 		offset: number = 0,
 	): Promise<{ mbid: string; listenedAt: number }[]> {
-		const url = new URL(`${BASE_URL}/1/feedback/user/${username}/get-feedback`);
-		url.searchParams.set("score", "1");
-		url.searchParams.set("count", String(count));
-		url.searchParams.set("offset", String(offset));
-
-		const response = await fetch(url.toString(), {
-			// @ts-ignore
-			dispatcher: ipv4Agent,
-		});
-		await checkResponse(response);
-
-		const data = (await response.json()) as {
-			feedback: Array<{ recording_mbid: string | null; created: number }>;
-		};
+		let response;
+		try {
+			response = await axios.get<{
+				feedback: Array<{ recording_mbid: string | null; created: number }>;
+			}>(`/1/feedback/user/${username}/get-feedback`, {
+				params: { score: 1, count, offset },
+			});
+		} catch (error) {
+			rethrowAxiosError(error);
+		}
 
 		const results: { mbid: string; listenedAt: number }[] = [];
 
-		for (const entry of data.feedback) {
+		for (const entry of response.data.feedback) {
 			if (entry.recording_mbid === null || entry.recording_mbid === undefined) {
 				continue;
 			}
@@ -122,25 +123,20 @@ export class ListenBrainzApi {
 		count: number = 100,
 		offset: number = 0,
 	): Promise<{ mbid: string }[]> {
-		const url = new URL(
-			`${BASE_URL}/1/cf/recommendation/user/${username}/recording`,
-		);
-		url.searchParams.set("count", String(count));
-		url.searchParams.set("offset", String(offset));
-
-		const response = await fetch(url.toString(), {
-			// @ts-ignore
-			dispatcher: ipv4Agent,
-		});
-		await checkResponse(response);
-
-		const data = (await response.json()) as {
-			payload: { mbids: Array<{ recording_mbid: string | null }> };
-		};
+		let response;
+		try {
+			response = await axios.get<{
+				payload: { mbids: Array<{ recording_mbid: string | null }> };
+			}>(`/1/cf/recommendation/user/${username}/recording`, {
+				params: { count, offset },
+			});
+		} catch (error) {
+			rethrowAxiosError(error);
+		}
 
 		const results: { mbid: string }[] = [];
 
-		for (const entry of data.payload.mbids) {
+		for (const entry of response.data.payload.mbids) {
 			if (entry.recording_mbid === null || entry.recording_mbid === undefined) {
 				continue;
 			}
@@ -152,17 +148,17 @@ export class ListenBrainzApi {
 	}
 
 	async validateToken(token: string): Promise<boolean> {
-		const response = await fetch(`${BASE_URL}/1/validate-token`, {
-			headers: {
-				Authorization: `Token ${token}`,
-			},
-			// @ts-ignore
-			dispatcher: ipv4Agent,
-		});
+		let response;
+		try {
+			response = await axios.get<{ valid: boolean }>("/1/validate-token", {
+				headers: {
+					Authorization: `Token ${token}`,
+				},
+			});
+		} catch (error) {
+			rethrowAxiosError(error);
+		}
 
-		await checkResponse(response);
-
-		const data = (await response.json()) as { valid: boolean };
-		return data.valid;
+		return response.data.valid;
 	}
 }
