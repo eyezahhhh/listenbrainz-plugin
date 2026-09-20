@@ -8,12 +8,14 @@ import { ListenBrainzUserConfig } from "./user-config.js";
 import { ListensTask, PlaylistsTask } from "./sync-task.js";
 import path from "node:path";
 import { ListenBrainzAttributeSource } from "./listenbrainz.attribute-source.js";
+import { ListenbrainzExternalUrlSource } from "./listenbrainz.external-url-source.js";
 
 export default class Plugin implements PipeBomb.Plugin {
 	private db: ListenBrainzDb | null = null;
 
 	async enable(ctx: PipeBomb.PluginApiContext): Promise<void> {
 		ctx.registerLanguageDirectory("lang");
+		ctx.registerIconDirectory("icons");
 
 		const cacheDir = await ctx.requestCacheDirectory();
 		const dbPath = path.join(cacheDir, "listenbrainz.db");
@@ -49,6 +51,8 @@ export default class Plugin implements PipeBomb.Plugin {
 
 		ctx.registerTask(listensTask);
 		ctx.registerTask(playlistsTask);
+
+		ctx.registerExternalUrlSource(new ListenbrainzExternalUrlSource());
 	}
 
 	disable(): void {
