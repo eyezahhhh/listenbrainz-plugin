@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import type { ListenBrainzUser } from "./types/user.interface.js";
 
 export class ListenBrainzDb {
 	private db: Database.Database;
@@ -70,12 +71,7 @@ export class ListenBrainzDb {
 			.run({ userUuid, lbUsername });
 	}
 
-	getUser(userUuid: string): {
-		userUuid: string;
-		lbUsername: string;
-		lovedPlaylist: string | null;
-		recsPlaylist: string | null;
-	} | null {
+	getUser(userUuid: string): ListenBrainzUser | null {
 		const row = this.db
 			.prepare(
 				`SELECT user_uuid, lb_username, loved_playlist, recs_playlist
@@ -102,12 +98,7 @@ export class ListenBrainzDb {
 		};
 	}
 
-	getAllUsers(): Array<{
-		userUuid: string;
-		lbUsername: string;
-		lovedPlaylist: string | null;
-		recsPlaylist: string | null;
-	}> {
+	getAllUsers(): ListenBrainzUser[] {
 		const rows = this.db
 			.prepare(
 				`SELECT user_uuid, lb_username, loved_playlist, recs_playlist FROM lb_users`,

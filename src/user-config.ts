@@ -6,12 +6,23 @@ import type {
 import { ListenBrainzDb } from "./db.js";
 
 export class ListenBrainzUserConfig implements UserConfigManager {
-	private ctx!: UserConfigManagerApiContext;
+	private ctx: UserConfigManagerApiContext | null = null;
 
 	constructor(private readonly db: ListenBrainzDb) {}
 
+	private get context(): UserConfigManagerApiContext {
+		if (!this.ctx) {
+			throw new Error("ListenBrainz user config is not enabled");
+		}
+		return this.ctx;
+	}
+
 	enable(ctx: UserConfigManagerApiContext): void {
 		this.ctx = ctx;
+	}
+
+	dispose(): void {
+		this.ctx = null;
 	}
 
 	canUserAccess(_userUuid: string): boolean {
@@ -21,13 +32,13 @@ export class ListenBrainzUserConfig implements UserConfigManager {
 	async getConfigOptions(userUuid: string): Promise<ConfigNode | null> {
 		const token = await this.getToken(userUuid);
 		const username = await this.getUsername(userUuid);
-		const scrobble = await this.ctx.getValue(
+		const scrobble = await this.context.getValue(
 			userUuid,
 			"scrobble_enabled",
 			"string",
 		);
-		const loved = await this.ctx.getValue(userUuid, "loved_enabled", "string");
-		const recs = await this.ctx.getValue(userUuid, "recs_enabled", "string");
+		const loved = await this.context.getValue(userUuid, "loved_enabled", "string");
+		const recs = await this.context.getValue(userUuid, "recs_enabled", "string");
 
 		return {
 			type: "section",
@@ -97,9 +108,9 @@ export class ListenBrainzUserConfig implements UserConfigManager {
 			const value = values[key];
 
 			if (typeof value === "string" && value.trim()) {
-				await this.ctx.setValue(userUuid, key, "string", value.trim());
+				await this.context.setValue(userUuid, key, "string", value.trim());
 			} else {
-				await this.ctx.delete(userUuid, key);
+				await this.context.delete(userUuid, key);
 			}
 		}
 
@@ -116,15 +127,15 @@ export class ListenBrainzUserConfig implements UserConfigManager {
 	}
 
 	async getToken(userUuid: string): Promise<string | null> {
-		return this.ctx.getValue(userUuid, "token", "string");
+		return this.context.getValue(userUuid, "token", "string");
 	}
 
 	async getUsername(userUuid: string): Promise<string | null> {
-		return this.ctx.getValue(userUuid, "username", "string");
+		return this.context.getValue(userUuid, "username", "string");
 	}
 
 	async isScrobbleEnabled(userUuid: string): Promise<boolean> {
-		const value = await this.ctx.getValue(
+		const value = await this.context.getValue(
 			userUuid,
 			"scrobble_enabled",
 			"string",
@@ -138,7 +149,7 @@ export class ListenBrainzUserConfig implements UserConfigManager {
 	}
 
 	async isLovedEnabled(userUuid: string): Promise<boolean> {
-		const value = await this.ctx.getValue(userUuid, "loved_enabled", "string");
+		const value = await this.context.getValue(userUuid, "loved_enabled", "string");
 
 		if (value === null) {
 			return true;
@@ -148,7 +159,7 @@ export class ListenBrainzUserConfig implements UserConfigManager {
 	}
 
 	async isRecsEnabled(userUuid: string): Promise<boolean> {
-		const value = await this.ctx.getValue(userUuid, "recs_enabled", "string");
+		const value = await this.context.getValue(userUuid, "recs_enabled", "string");
 
 		if (value === null) {
 			return true;

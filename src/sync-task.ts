@@ -1,22 +1,10 @@
 import type {
-	AttributeValue,
-	AttributeValues,
-	BufferAttributeValue,
-	DataClient,
-	LibraryHandlerId,
-	PlaybackHistoryClient,
-	PlaybackHistoryEntry,
-	SavedArtist,
-	SavedAttribute,
 	SavedAttributeValues,
 	SubTask,
 	TaskRunContext,
-	WritablePlaylistClient,
 } from "@pipe-bomb/plugin-sdk";
-import { createHash } from "node:crypto";
-import { type ListenBrainzApi, type ListenPayload } from "./api.js";
-import { type ListenBrainzDb } from "./db.js";
-import { type ListenBrainzUserConfig } from "./user-config.js";
+import type { SearchAttribute } from "ephemeral-import/src/attribute-entry.js";
+import type { SearchClient } from "ephemeral-import/src/search-client.js";
 import {
 	ATTRIBUTE_SOURCE_ID,
 	buildPlaylistAttributes,
@@ -24,429 +12,422 @@ import {
 	getPlaylistTitle,
 	migratePlaylistMappings,
 	reconcileOrphans,
-	type ListenBrainzPlaylistType,
 } from "./playlist-mapping.js";
+import { ListenBrainzTask } from "./task-base.js";
+import { computeFingerprint } from "./util/fingerprint.util.js";
+import { createPlaylistCover, COVER_COLLAGE_SIZE } from "./util/cover.util.js";
+import type {
+	FingerprintEntry,
+	PendingListen,
+	RecordingMetadata,
+} from "./types/listen.interface.js";
+import type {
+	DiscoveredMappings,
+	ListenBrainzPlaylistType,
+} from "./types/playlist.interface.js";
+import type {
+	ListenBrainzContext,
+	ListensSubTask,
+	MbIndexTrack,
+	PlaylistsSubTask,
+} from "./types/task.interface.js";
+import type { ListenBrainzUser } from "./types/user.interface.js";
 
-type ListensSubTask = "all" | "new";
-type PlaylistsSubTask = "loved-tracks" | "recommendations";
-
-function computeFingerprint(entry: PlaybackHistoryEntry): string {
-	const raw =
-		entry.trackUuid +
-		entry.userUuid +
-		entry.datePlayed.toISOString() +
-		(entry.pluginId ?? "") +
-		entry.clientName;
-	return createHash("sha1").update(raw).digest("hex");
-}
-
-function getStringAttr(
-	attrs: SavedAttribute[] | null | undefined,
-	key: string,
-): string | undefined {
-	const attr = attrs?.find((a) => a.key === key && a.type === "string");
-	if (!attr) {
-		return undefined;
-	}
-	return (attr.values as string[])[0];
-}
-
-async function buildTrackIndex(
-	dataClient: DataClient,
-): Promise<Map<string, LibraryHandlerId & { trackId: string }>> {
-	const index = new Map<string, LibraryHandlerId & { trackId: string }>();
-	const libraryIds = dataClient.getLibraryHandlerIds();
-	for (const lib of libraryIds) {
-		await dataClient.forEachTrackId(
-			lib.pluginId,
-			lib.libraryId,
-			(trackId, trackUuid) => {
-				index.set(trackUuid, {
-					pluginId: lib.pluginId,
-					libraryId: lib.libraryId,
-					trackId,
-				});
-			},
-		);
-	}
-	return index;
-}
-
-interface MbIndexTrack {
-	uuid: string;
-	attributes: SavedAttribute[];
-}
-
-async function buildMbidIndex(
-	dataClient: DataClient,
-): Promise<Map<string, MbIndexTrack>> {
-	const mbidToUuid = new Map<string, MbIndexTrack>();
-	const libraryIds = dataClient.getLibraryHandlerIds();
-	for (const lib of libraryIds) {
-		await dataClient.forEachTrackId(
-			lib.pluginId,
-			lib.libraryId,
-			async (trackId) => {
-				const track = await dataClient.getTrack(
-					lib.pluginId,
-					lib.libraryId,
-					trackId,
-					{
-						relations: { identities: true, attributes: true },
-					},
-				);
-				if (!track) {
-					return;
-				}
-				for (const identity of track.identities ?? []) {
-					if (identity.identityId === "musicbrainz_recording_id") {
-						mbidToUuid.set(identity.identity, {
-							uuid: track.uuid,
-							attributes: track.attributes ?? [],
-						});
-					}
-				}
-			},
-		);
-	}
-	return mbidToUuid;
-}
-
-async function buildListenPayload(
-	entry: PlaybackHistoryEntry,
-	trackRef: LibraryHandlerId & { trackId: string },
-	dataClient: DataClient,
-): Promise<ListenPayload | null> {
-	const savedTrack = await dataClient.getTrack(
-		trackRef.pluginId,
-		trackRef.libraryId,
-		trackRef.trackId,
-		{
-			relations: {
-				attributes: true,
-				artists: { attributes: true },
-				albums: { attributes: true },
-				identities: true,
-			},
-		},
-	);
-
-	if (!savedTrack) {
-		return null;
-	}
-
-	const artistNames: string[] = [];
-	for (const artistTrack of savedTrack.artists ?? []) {
-		const name = getStringAttr(
-			(artistTrack.artist as SavedArtist).attributes,
-			"name",
-		);
-		if (name) {
-			artistNames.push(name);
-		}
-	}
-	const artistName =
-		artistNames.length > 0 ? artistNames.join(", ") : "Unknown Artist";
-
-	let releaseName: string | undefined;
-	const firstAlbum = (savedTrack.albums ?? [])[0];
-	if (firstAlbum?.album) {
-		releaseName = getStringAttr(firstAlbum.album.attributes, "title");
-	}
-
-	const payload: ListenPayload = {
-		listenedAt: Math.floor(entry.datePlayed.getTime() / 1000),
-		trackName: savedTrack.title,
-		artistName,
-	};
-
-	if (releaseName !== undefined) {
-		payload.releaseName = releaseName;
-	}
-
-	const recordingMbid = savedTrack.identities?.find(
-		(i) => i.identityId === "musicbrainz_recording_id",
-	)?.identity;
-	if (recordingMbid !== undefined) {
-		payload.recordingMbid = recordingMbid;
-	}
-
-	return payload;
-}
-
-async function upsertPlaylist(
-	playlistClient: WritablePlaylistClient,
-	existingUuid: string | null,
-	userUuid: string,
-	type: ListenBrainzPlaylistType,
-	trackUuids: string[],
-	covers: SavedAttributeValues["buffer"][],
-): Promise<string> {
-	const title = getPlaylistTitle(type);
-	const attributes = buildPlaylistAttributes(userUuid, type, title, covers);
-
-	let uuid = existingUuid;
-	if (!uuid) {
-		uuid = await playlistClient.createPlaylist({
-			attributes: {
-				sourceId: ATTRIBUTE_SOURCE_ID,
-				attributes,
-			},
-		});
-		await playlistClient.addPlaylistMember(uuid, userUuid, "viewer");
-	} else {
-		await playlistClient.updatePlaylistAttributes(
-			uuid,
-			ATTRIBUTE_SOURCE_ID,
-			attributes,
-		);
-	}
-
-	const playlist = await playlistClient.getPlaylist(uuid, {
-		relations: { tracks: true },
-	});
-	const currentUuids = new Set(
-		(playlist?.tracks ?? []).map((t) => t.trackUuid),
-	);
-	const newUuids = new Set(trackUuids);
-
-	const toAdd = trackUuids.filter((u) => !currentUuids.has(u));
-	const toRemove = [...currentUuids].filter((u) => !newUuids.has(u));
-
-	if (toAdd.length > 0) {
-		await playlistClient.addToPlaylist(uuid, toAdd);
-	}
-	if (toRemove.length > 0) {
-		await playlistClient.removeFromPlaylist(uuid, toRemove);
-	}
-
-	return uuid;
-}
-
-export class ListensTask implements SubTask<ListensSubTask> {
+export class ListensTask extends ListenBrainzTask implements SubTask<ListensSubTask> {
 	readonly id = "upload-listens";
 	readonly resumable = false;
-
-	constructor(
-		private readonly api: ListenBrainzApi,
-		private readonly db: ListenBrainzDb,
-		private readonly userConfig: ListenBrainzUserConfig,
-		private readonly historyClient: PlaybackHistoryClient,
-		private readonly dataClient: DataClient,
-	) {}
 
 	getSubTasks(): readonly ListensSubTask[] {
 		return ["all", "new"];
 	}
 
 	async run(context: TaskRunContext, subTaskId: ListensSubTask): Promise<void> {
-		if (subTaskId === "all") {
-			await this.runImport(context);
-		} else if (subTaskId === "new") {
-			await this.runScrobbles(context);
-		}
+		await this.upload(context, subTaskId);
 	}
 
-	private async runImport(context: TaskRunContext): Promise<void> {
-		const trackIndex = await buildTrackIndex(this.dataClient);
-		const users = this.db.getAllUsers();
-		let usersProcessed = 0;
+	private async upload(
+		context: TaskRunContext,
+		mode: ListensSubTask,
+	): Promise<void> {
+		const trackIndex = await this.buildTrackIndex();
+		const users = this.deps.db.getAllUsers();
+		const skipExisting = mode === "new";
 
-		for (const user of users) {
-			const token = await this.userConfig.getToken(user.userUuid);
-			if (!token) {
-				usersProcessed++;
-				context.update(Math.floor((usersProcessed / users.length) * 100));
-				continue;
-			}
+		await this.forEachActiveUser(
+			context,
+			users,
+			(userUuid) => this.deps.userConfig.isScrobbleEnabled(userUuid),
+			async (user, token) => {
+				let offset = 0;
+				let pending: PendingListen[] = [];
+				const allFingerprints: FingerprintEntry[] = [];
 
-			const enabled = await this.userConfig.isScrobbleEnabled(user.userUuid);
-			if (!enabled) {
-				usersProcessed++;
-				context.update(Math.floor((usersProcessed / users.length) * 100));
-				continue;
-			}
-
-			let offset = 0;
-			let pendingPayloads: ListenPayload[] = [];
-			const allFingerprints: Array<{
-				fingerprint: string;
-				userUuid: string;
-				datePlayed: number;
-				dateRecorded: number;
-			}> = [];
-
-			const submitBatch = async () => {
-				if (pendingPayloads.length === 0) {
-					return;
-				}
-				await this.api.submitListens(token, pendingPayloads, "import");
-				pendingPayloads = [];
-			};
-
-			while (true) {
-				const result = await this.historyClient.getUserHistory(user.userUuid, {
-					amount: 100,
-					offset,
-				});
-
-				if (result.entries.length === 0) {
-					break;
-				}
-
-				for (const entry of result.entries) {
-					const fp = computeFingerprint(entry);
-
-					const trackRef = trackIndex.get(entry.trackUuid);
-					if (!trackRef) {
-						continue;
+				const flush = async () => {
+					if (!pending.length) {
+						return;
 					}
 
-					const payload = await buildListenPayload(
-						entry,
-						trackRef,
-						this.dataClient,
+					await this.deps.api.submitListens(
+						token,
+						pending.map((item) => item.payload),
+						"import",
 					);
-					if (!payload) {
-						continue;
+
+					if (skipExisting) {
+						this.deps.db.insertFingerprints(
+							pending.map((item) => item.entry),
+						);
 					}
 
-					pendingPayloads.push(payload);
-					allFingerprints.push({
-						fingerprint: fp,
-						userUuid: user.userUuid,
-						datePlayed: entry.datePlayed.getTime(),
-						dateRecorded: entry.dateRecorded.getTime(),
-					});
-
-					if (pendingPayloads.length >= 1000) {
-						await submitBatch();
-					}
-				}
-
-				offset += result.entries.length;
-			}
-
-			await submitBatch();
-
-			this.db.clearFingerprints(user.userUuid);
-			this.db.insertFingerprints(allFingerprints);
-
-			usersProcessed++;
-			context.update(Math.floor((usersProcessed / users.length) * 100));
-		}
-
-		context.update(100);
-	}
-
-	private async runScrobbles(_context: TaskRunContext): Promise<void> {
-		const trackIndex = await buildTrackIndex(this.dataClient);
-		const users = this.db.getAllUsers();
-
-		for (const user of users) {
-			const token = await this.userConfig.getToken(user.userUuid);
-			if (!token) {
-				continue;
-			}
-
-			const enabled = await this.userConfig.isScrobbleEnabled(user.userUuid);
-			if (!enabled) {
-				continue;
-			}
-
-			let offset = 0;
-			let pendingListens: Array<{
-				payload: ListenPayload;
-				fingerprint: string;
-				dbEntry: {
-					fingerprint: string;
-					userUuid: string;
-					datePlayed: number;
-					dateRecorded: number;
+					pending = [];
 				};
-			}> = [];
 
-			const submitBatch = async () => {
-				if (pendingListens.length === 0) {
-					return;
-				}
-
-				const payloads = pendingListens.map((p) => p.payload);
-				const dbEntries = pendingListens.map((p) => p.dbEntry);
-
-				await this.api.submitListens(token, payloads, "import");
-				this.db.insertFingerprints(dbEntries);
-
-				pendingListens = [];
-			};
-
-			while (true) {
-				const result = await this.historyClient.getUserHistory(user.userUuid, {
-					amount: 100,
-					offset,
-				});
-
-				if (result.entries.length === 0) {
-					break;
-				}
-
-				for (const entry of result.entries) {
-					const fp = computeFingerprint(entry);
-
-					if (this.db.hasFingerprint(fp)) {
-						continue;
-					}
-
-					const trackRef = trackIndex.get(entry.trackUuid);
-					if (!trackRef) {
-						continue;
-					}
-
-					const payload = await buildListenPayload(
-						entry,
-						trackRef,
-						this.dataClient,
+				while (true) {
+					const result = await this.deps.historyClient.getUserHistory(
+						user.userUuid,
+						{ amount: 100, offset },
 					);
-					if (!payload) {
-						continue;
+
+					if (result.entries.length === 0) {
+						break;
 					}
 
-					pendingListens.push({
-						payload,
-						fingerprint: fp,
-						dbEntry: {
-							fingerprint: fp,
+					for (const historyEntry of result.entries) {
+						const fingerprint = computeFingerprint(historyEntry);
+
+						if (skipExisting && this.deps.db.hasFingerprint(fingerprint)) {
+							continue;
+						}
+
+						const trackRef = trackIndex.get(historyEntry.trackUuid);
+						if (!trackRef) {
+							continue;
+						}
+
+						const payload = await this.buildListenPayload(
+							historyEntry,
+							trackRef,
+						);
+						if (!payload) {
+							continue;
+						}
+
+						const entry: FingerprintEntry = {
+							fingerprint,
 							userUuid: user.userUuid,
-							datePlayed: entry.datePlayed.getTime(),
-							dateRecorded: entry.dateRecorded.getTime(),
-						},
-					});
+							datePlayed: historyEntry.datePlayed.getTime(),
+							dateRecorded: historyEntry.dateRecorded.getTime(),
+						};
 
-					if (pendingListens.length >= 1000) {
-						await submitBatch();
+						if (!skipExisting) {
+							allFingerprints.push(entry);
+						}
+
+						pending.push({ payload, entry });
+
+						if (pending.length >= 1000) {
+							await flush();
+						}
 					}
+
+					offset += result.entries.length;
 				}
 
-				offset += result.entries.length;
-			}
+				await flush();
 
-			await submitBatch();
-		}
+				if (!skipExisting) {
+					this.deps.db.clearFingerprints(user.userUuid);
+					this.deps.db.insertFingerprints(allFingerprints);
+				}
+			},
+		);
 	}
 }
 
-export class PlaylistsTask implements SubTask<PlaylistsSubTask> {
+abstract class PlaylistSyncTask extends ListenBrainzTask {
+	abstract readonly type: ListenBrainzPlaylistType;
+
+	protected abstract isEnabled(userUuid: string): Promise<boolean>;
+
+	protected abstract fetchMbids(username: string): Promise<Array<{ mbid: string }>>;
+
+	async sync(
+		context: TaskRunContext,
+		users: ListenBrainzUser[],
+		mappings: DiscoveredMappings["mappings"],
+		mbidIndex: Map<string, MbIndexTrack>,
+	): Promise<void> {
+		const searchClient = await this.deps.getSearchClient();
+
+		await this.forEachActiveUser(
+			context,
+			users,
+			(userUuid) => this.isEnabled(userUuid),
+			async (user) => {
+				const items = await this.fetchMbids(user.lbUsername);
+				const { uuids, covers } = await this.resolveTracks(
+					mbidIndex,
+					items,
+					searchClient,
+				);
+
+				await this.upsertPlaylist(
+					mappings.get(user.userUuid)?.[this.type] ?? null,
+					user.userUuid,
+					uuids,
+					covers,
+				);
+			},
+		);
+	}
+
+	private async resolveTracks(
+		index: Map<string, MbIndexTrack>,
+		items: Array<{ mbid: string }>,
+		searchClient: SearchClient | null,
+	): Promise<{
+		uuids: string[];
+		covers: SavedAttributeValues["buffer"][];
+	}> {
+		const uuids: string[] = [];
+		const covers: SavedAttributeValues["buffer"][] = [];
+		const misses: string[] = [];
+
+		for (const item of items) {
+			const track = index.get(item.mbid);
+			if (!track) {
+				misses.push(item.mbid);
+				continue;
+			}
+
+			if (!uuids.includes(track.uuid)) {
+				uuids.push(track.uuid);
+			}
+
+			for (const attribute of track.attributes) {
+				if (
+					attribute.key === "front" &&
+					attribute.type === "buffer" &&
+					attribute.values.length
+				) {
+					covers.push(attribute.values[0]!);
+				}
+			}
+		}
+
+		if (searchClient && misses.length) {
+			const found = await this.findTracksViaSearch(searchClient, misses);
+			for (const uuid of found) {
+				if (!uuids.includes(uuid)) {
+					uuids.push(uuid);
+				}
+			}
+		}
+
+		return { uuids, covers };
+	}
+
+	private buildSearchAttributes(metadata: RecordingMetadata): SearchAttribute[] {
+		const attributes: SearchAttribute[] = [];
+
+		if (metadata.isrcs.length > 0) {
+			attributes.push({ key: "isrc", type: "string", value: metadata.isrcs[0]! });
+		}
+		if (metadata.durationSeconds !== null) {
+			attributes.push({
+				key: "duration",
+				type: "decimal",
+				value: metadata.durationSeconds,
+			});
+		}
+
+		return attributes;
+	}
+
+	private async findTracksViaSearch(
+		searchClient: SearchClient,
+		mbids: string[],
+	): Promise<string[]> {
+		const metadata = await this.deps.api.getRecordingMetadata(mbids);
+		const uuids: string[] = [];
+
+		for (const mbid of mbids) {
+			const track = metadata.get(mbid);
+			if (!track) {
+				continue;
+			}
+
+			const result = await searchClient.findTrack({
+				title: track.title,
+				artists: track.artistNames.map((name) => [
+					{ key: "name", type: "string" as const, value: name },
+				]),
+				album: track.releaseName
+					? [{ key: "title", type: "string" as const, value: track.releaseName }]
+					: undefined,
+				attributes: this.buildSearchAttributes(track),
+			});
+
+			if (!result) {
+				continue;
+			}
+
+			const uuid = result.ephemeral
+				? await this.deps.dataClient.saveTrack(
+						{
+							pluginId: result.source.pluginId,
+							libraryId: result.source.source.getLibraryHandler().id,
+							trackId: result.track.id,
+						},
+						null,
+					)
+				: result.track.uuid;
+
+			if (uuid && !uuids.includes(uuid)) {
+				uuids.push(uuid);
+			}
+		}
+
+		return uuids;
+	}
+
+	private buildCover(
+		covers: SavedAttributeValues["buffer"][],
+	): (() => Promise<Buffer>) | undefined {
+		const unique = new Map<string, SavedAttributeValues["buffer"]>();
+		for (const cover of covers) {
+			if (!unique.has(cover.uuid)) {
+				unique.set(cover.uuid, cover);
+			}
+		}
+
+		const all = [...unique.values()];
+		if (!all.length) {
+			return undefined;
+		}
+
+		const selected =
+			all.length >= COVER_COLLAGE_SIZE
+				? all.slice(0, COVER_COLLAGE_SIZE)
+				: all.slice(0, 1);
+
+		return async () => {
+			const buffers: Buffer[] = [];
+			for (const cover of selected) {
+				const resource = await this.deps.dataClient.getResource(
+					cover.uuid,
+					cover.extension,
+				);
+				if (resource) {
+					buffers.push(resource);
+				}
+			}
+
+			if (!buffers.length) {
+				throw new Error("No cover resources could be read");
+			}
+
+			return createPlaylistCover(buffers);
+		};
+	}
+
+	private async upsertPlaylist(
+		existingUuid: string | null,
+		userUuid: string,
+		trackUuids: string[],
+		covers: SavedAttributeValues["buffer"][],
+	): Promise<string> {
+		const attributes = buildPlaylistAttributes(
+			userUuid,
+			this.type,
+			getPlaylistTitle(this.type),
+			this.buildCover(covers),
+		);
+
+		let uuid = existingUuid;
+		if (!uuid) {
+			uuid = await this.deps.playlistClient.createPlaylist({
+				attributes: {
+					sourceId: ATTRIBUTE_SOURCE_ID,
+					attributes,
+				},
+			});
+			await this.deps.playlistClient.addPlaylistMember(
+				uuid,
+				userUuid,
+				"viewer",
+			);
+		} else {
+			await this.deps.playlistClient.updatePlaylistAttributes(
+				uuid,
+				ATTRIBUTE_SOURCE_ID,
+				attributes,
+			);
+		}
+
+		const playlist = await this.deps.playlistClient.getPlaylist(uuid, {
+			relations: { tracks: true },
+		});
+		const currentUuids = new Set(
+			(playlist?.tracks ?? []).map((track) => track.trackUuid),
+		);
+		const newUuids = new Set(trackUuids);
+
+		const toAdd = trackUuids.filter((u) => !currentUuids.has(u));
+		const toRemove = [...currentUuids].filter((u) => !newUuids.has(u));
+
+		if (toAdd.length > 0) {
+			await this.deps.playlistClient.addToPlaylist(uuid, toAdd);
+		}
+		if (toRemove.length > 0) {
+			await this.deps.playlistClient.removeFromPlaylist(uuid, toRemove);
+		}
+
+		return uuid;
+	}
+}
+
+class LovedTracksTask extends PlaylistSyncTask {
+	readonly type = "loved";
+
+	protected isEnabled(userUuid: string): Promise<boolean> {
+		return this.deps.userConfig.isLovedEnabled(userUuid);
+	}
+
+	protected fetchMbids(username: string): Promise<Array<{ mbid: string }>> {
+		return this.deps.api.getLovedTracks(username);
+	}
+}
+
+class RecommendationsTask extends PlaylistSyncTask {
+	readonly type = "recommendations";
+
+	protected isEnabled(userUuid: string): Promise<boolean> {
+		return this.deps.userConfig.isRecsEnabled(userUuid);
+	}
+
+	protected fetchMbids(username: string): Promise<Array<{ mbid: string }>> {
+		return this.deps.api.getRecommendations(username);
+	}
+}
+
+export class PlaylistsTask
+	extends ListenBrainzTask
+	implements SubTask<PlaylistsSubTask>
+{
 	readonly id = "create-playlists";
 	readonly resumable = false;
-	private migrated = false;
 
-	constructor(
-		private readonly api: ListenBrainzApi,
-		private readonly db: ListenBrainzDb,
-		private readonly userConfig: ListenBrainzUserConfig,
-		private readonly dataClient: DataClient,
-		private readonly playlistClient: WritablePlaylistClient,
-	) {}
+	private migrated = false;
+	private readonly syncers: Record<PlaylistsSubTask, PlaylistSyncTask>;
+
+	constructor(deps: ListenBrainzContext) {
+		super(deps);
+		this.syncers = {
+			"loved-tracks": new LovedTracksTask(deps),
+			recommendations: new RecommendationsTask(deps),
+		};
+	}
 
 	getSubTasks(): readonly PlaylistsSubTask[] {
 		return ["loved-tracks", "recommendations"];
@@ -458,11 +439,19 @@ export class PlaylistsTask implements SubTask<PlaylistsSubTask> {
 	): Promise<void> {
 		await this.ensureMigrated();
 
-		if (subTaskId === "loved-tracks") {
-			await this.runLovedTracks(context);
-		} else if (subTaskId === "recommendations") {
-			await this.runRecommendations(context);
-		}
+		const users = this.deps.db.getAllUsers();
+		const { mappings, playlists } = await discoverPlaylistMappings(
+			this.deps.playlistClient,
+		);
+		const mbidIndex = await this.buildMbidIndex();
+
+		await this.syncers[subTaskId].sync(context, users, mappings, mbidIndex);
+
+		await reconcileOrphans(
+			this.deps.playlistClient,
+			playlists,
+			new Set(users.map((user) => user.userUuid)),
+		);
 	}
 
 	private async ensureMigrated(): Promise<void> {
@@ -470,119 +459,11 @@ export class PlaylistsTask implements SubTask<PlaylistsSubTask> {
 			return;
 		}
 
-		await migratePlaylistMappings(this.db, this.playlistClient);
+		await migratePlaylistMappings(this.deps.db, this.deps.playlistClient);
 		this.migrated = true;
 	}
 
-	private async runLovedTracks(_context: TaskRunContext): Promise<void> {
-		const mbidIndex = await buildMbidIndex(this.dataClient);
-		const users = this.db.getAllUsers();
-		const { mappings, playlists } = await discoverPlaylistMappings(
-			this.playlistClient,
-		);
-
-		for (const user of users) {
-			const token = await this.userConfig.getToken(user.userUuid);
-			if (!token) {
-				continue;
-			}
-
-			const enabled = await this.userConfig.isLovedEnabled(user.userUuid);
-			if (!enabled) {
-				continue;
-			}
-
-			const loved = await this.api.getLovedTracks(user.lbUsername);
-
-			const resolvedUuids: string[] = [];
-			const covers: SavedAttributeValues["buffer"][] = [];
-
-			for (const item of loved) {
-				const track = mbidIndex.get(item.mbid);
-				if (track) {
-					resolvedUuids.push(track.uuid);
-					for (const attribute of track.attributes) {
-						if (
-							attribute.key == "front" &&
-							attribute.type == "buffer" &&
-							attribute.values.length
-						) {
-							covers.push(attribute.values[0]!);
-						}
-					}
-				}
-			}
-
-			await upsertPlaylist(
-				this.playlistClient,
-				mappings.get(user.userUuid)?.loved ?? null,
-				user.userUuid,
-				"loved",
-				resolvedUuids,
-				covers,
-			);
-		}
-
-		await reconcileOrphans(
-			this.playlistClient,
-			playlists,
-			new Set(users.map((user) => user.userUuid)),
-		);
-	}
-
-	private async runRecommendations(_context: TaskRunContext): Promise<void> {
-		const mbidIndex = await buildMbidIndex(this.dataClient);
-		const users = this.db.getAllUsers();
-		const { mappings, playlists } = await discoverPlaylistMappings(
-			this.playlistClient,
-		);
-
-		for (const user of users) {
-			const token = await this.userConfig.getToken(user.userUuid);
-			if (!token) {
-				continue;
-			}
-
-			const enabled = await this.userConfig.isRecsEnabled(user.userUuid);
-			if (!enabled) {
-				continue;
-			}
-
-			const recs = await this.api.getRecommendations(user.lbUsername);
-
-			const resolvedUuids: string[] = [];
-			const covers: SavedAttributeValues["buffer"][] = [];
-
-			for (const item of recs) {
-				const track = mbidIndex.get(item.mbid);
-				if (track) {
-					resolvedUuids.push(track.uuid);
-					for (const attribute of track.attributes) {
-						if (
-							attribute.key == "front" &&
-							attribute.type == "buffer" &&
-							attribute.values.length
-						) {
-							covers.push(attribute.values[0]!);
-						}
-					}
-				}
-			}
-
-			await upsertPlaylist(
-				this.playlistClient,
-				mappings.get(user.userUuid)?.recommendations ?? null,
-				user.userUuid,
-				"recommendations",
-				resolvedUuids,
-				covers,
-			);
-		}
-
-		await reconcileOrphans(
-			this.playlistClient,
-			playlists,
-			new Set(users.map((user) => user.userUuid)),
-		);
+	override dispose(): void {
+		this.migrated = false;
 	}
 }

@@ -1,18 +1,18 @@
 import type {
 	AttributeValue,
-	SavedAttributeValues,
 	SavedPlaylist,
 	WritablePlaylistClient,
 } from "@pipe-bomb/plugin-sdk";
 import { PLAYLIST_BOT_ID } from "./const/playlist-bot-id.const.js";
 import type { ListenBrainzDb } from "./db.js";
-import path from "path";
-import { createPlaylistCover } from "./utils.js";
+import type {
+	DiscoveredMappings,
+	DiscoveredPlaylist,
+	ListenBrainzPlaylistType,
+} from "./types/playlist.interface.js";
 
 export const PLUGIN_ID = "listenbrainz";
 export const ATTRIBUTE_SOURCE_ID = "listenbrainz";
-
-export type ListenBrainzPlaylistType = "loved" | "recommendations";
 
 const PLAYLIST_TITLES: Record<ListenBrainzPlaylistType, string> = {
 	loved: "ListenBrainz Likes",
@@ -27,7 +27,7 @@ export function buildPlaylistAttributes(
 	userUuid: string,
 	type: ListenBrainzPlaylistType,
 	title: string,
-	covers: SavedAttributeValues["buffer"][],
+	cover?: () => Promise<Buffer>,
 ): AttributeValue[] {
 	const attributes: AttributeValue[] = [
 		{ key: "title", value: title },
@@ -35,17 +35,12 @@ export function buildPlaylistAttributes(
 		{ key: "listenbrainz_playlist_type", value: type },
 	];
 
-	if (covers.length) {
-		const coverPath = path.join(
-			"resources",
-			covers[0]!.uuid.substring(0, 3),
-			`${covers[0]!.uuid}.${covers[0]!.extension}`,
-		);
+	if (cover) {
 		attributes.push({
 			key: "thumb",
 			value: {
 				extension: "jpg",
-				buffer: () => createPlaylistCover(coverPath),
+				buffer: cover,
 			},
 		});
 	}
@@ -76,17 +71,6 @@ function parsePlaylistType(
 		return value;
 	}
 	return null;
-}
-
-export interface DiscoveredPlaylist {
-	uuid: string;
-	userUuid: string | null;
-	type: ListenBrainzPlaylistType | null;
-}
-
-export interface DiscoveredMappings {
-	mappings: Map<string, Partial<Record<ListenBrainzPlaylistType, string>>>;
-	playlists: DiscoveredPlaylist[];
 }
 
 export async function discoverPlaylistMappings(
@@ -178,7 +162,6 @@ export async function migratePlaylistMappings(
 					user.userUuid,
 					type,
 					getPlaylistTitle(type),
-					[],
 				),
 			);
 		}

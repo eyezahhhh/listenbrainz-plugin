@@ -1,43 +1,21 @@
-import Axios from "axios";
+import Axios, { type AxiosInstance } from "axios";
+import type {
+	LbListen,
+	LbMetadataResponse,
+	LbTrackMetadata,
+	ListenPayload,
+	RecordingMetadata,
+} from "./types/listen.interface.js";
+import { rethrowAxiosError } from "./util/error.util.js";
 
-const axios = Axios.create({
-	baseURL: "https://api.listenbrainz.org",
-	family: 4,
-});
-
-export interface ListenPayload {
-	listenedAt: number;
-	trackName: string;
-	artistName: string;
-	releaseName?: string;
-	recordingMbid?: string;
-}
-
-interface LbTrackMetadata {
-	artist_name: string;
-	track_name: string;
-	release_name?: string;
-	additional_info: {
-		listening_from: string;
-		recording_mbid?: string;
-	};
-}
-
-interface LbListen {
-	listened_at: number;
-	track_metadata: LbTrackMetadata;
-}
-
-function rethrowAxiosError(error: unknown): never {
-	if (Axios.isAxiosError(error) && error.response) {
-		throw new Error(
-			`ListenBrainz API error ${error.response.status}: ${String(error.response.data)}`,
-		);
-	}
-	throw error;
-}
+const METADATA_BATCH_SIZE = 100;
 
 export class ListenBrainzApi {
+	private readonly http: AxiosInstance = Axios.create({
+		baseURL: "https://api.listenbrainz.org",
+		family: 4,
+	});
+
 	async submitListens(
 		token: string,
 		listens: ListenPayload[],
@@ -69,7 +47,7 @@ export class ListenBrainzApi {
 		});
 
 		try {
-			await axios.post(
+			await this.http.post(
 				"/1/submit-listens",
 				{
 					listen_type: listenType,
@@ -93,7 +71,7 @@ export class ListenBrainzApi {
 	): Promise<{ mbid: string; listenedAt: number }[]> {
 		let response;
 		try {
-			response = await axios.get<{
+			response = await this.http.get<{
 				feedback: Array<{ recording_mbid: string | null; created: number }>;
 			}>(`/1/feedback/user/${username}/get-feedback`, {
 				params: { score: 1, count, offset },
@@ -125,7 +103,7 @@ export class ListenBrainzApi {
 	): Promise<{ mbid: string }[]> {
 		let response;
 		try {
-			response = await axios.get<{
+			response = await this.http.get<{
 				payload: { mbids: Array<{ recording_mbid: string | null }> };
 			}>(`/1/cf/recommendation/user/${username}/recording`, {
 				params: { count, offset },
@@ -150,7 +128,7 @@ export class ListenBrainzApi {
 	async validateToken(token: string): Promise<boolean> {
 		let response;
 		try {
-			response = await axios.get<{ valid: boolean }>("/1/validate-token", {
+			response = await this.http.get<{ valid: boolean }>("/1/validate-token", {
 				headers: {
 					Authorization: `Token ${token}`,
 				},
@@ -160,5 +138,60 @@ export class ListenBrainzApi {
 		}
 
 		return response.data.valid;
+	}
+
+	async getRecordingMetadata(
+		mbids: string[],
+	): Promise<Map<string, RecordingMetadata>> {
+		const metadata = new Map<string, RecordingMetadata>();
+		const unique = [...new Set(mbids)];
+
+		for (let index = 0; index < unique.length; index += METADATA_BATCH_SIZE) {
+			const batch = unique.slice(index, index + METADATA_BATCH_SIZE);
+
+			let response;
+			try {
+				response = await this.http.get<LbMetadataResponse>(
+					"/1/metadata/recording/",
+					{
+						params: {
+							recording_mbids: batch.join(","),
+							inc: "artist release",
+						},
+					},
+				);
+			} catch (error) {
+				rethrowAxiosError(error);
+			}
+
+			for (const [mbid, entry] of Object.entries(response.data)) {
+				const recording = entry.recording;
+				if (!recording?.name) {
+					continue;
+				}
+
+				const artistNames = (entry.artist?.artists ?? [])
+					.map((artist) => artist.name)
+					.filter((name): name is string => Boolean(name));
+
+				metadata.set(mbid, {
+					title: recording.name,
+					artistNames:
+						artistNames.length > 0
+							? artistNames
+							: entry.artist?.name
+								? [entry.artist.name]
+								: [],
+					releaseName: entry.release?.name ?? null,
+					isrcs: recording.isrcs ?? [],
+					durationSeconds:
+						typeof recording.length === "number"
+							? recording.length / 1000
+							: null,
+				});
+			}
+		}
+
+		return metadata;
 	}
 }
