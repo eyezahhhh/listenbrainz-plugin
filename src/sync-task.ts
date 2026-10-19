@@ -3,8 +3,6 @@ import type {
 	SubTask,
 	TaskRunContext,
 } from "@pipe-bomb/plugin-sdk";
-import type { SearchAttribute } from "ephemeral-import/src/attribute-entry.js";
-import type { SearchClient } from "ephemeral-import/src/search-client.js";
 import {
 	ATTRIBUTE_SOURCE_ID,
 	buildPlaylistAttributes,
@@ -32,8 +30,12 @@ import type {
 	PlaylistsSubTask,
 } from "./types/task.interface.js";
 import type { ListenBrainzUser } from "./types/user.interface.js";
+import { SearchAttribute, SearchClient } from "sublimate";
 
-export class ListensTask extends ListenBrainzTask implements SubTask<ListensSubTask> {
+export class ListensTask
+	extends ListenBrainzTask
+	implements SubTask<ListensSubTask>
+{
 	readonly id = "upload-listens";
 	readonly resumable = false;
 
@@ -74,9 +76,7 @@ export class ListensTask extends ListenBrainzTask implements SubTask<ListensSubT
 					);
 
 					if (skipExisting) {
-						this.deps.db.insertFingerprints(
-							pending.map((item) => item.entry),
-						);
+						this.deps.db.insertFingerprints(pending.map((item) => item.entry));
 					}
 
 					pending = [];
@@ -149,7 +149,9 @@ abstract class PlaylistSyncTask extends ListenBrainzTask {
 
 	protected abstract isEnabled(userUuid: string): Promise<boolean>;
 
-	protected abstract fetchMbids(username: string): Promise<Array<{ mbid: string }>>;
+	protected abstract fetchMbids(
+		username: string,
+	): Promise<Array<{ mbid: string }>>;
 
 	async sync(
 		context: TaskRunContext,
@@ -227,11 +229,17 @@ abstract class PlaylistSyncTask extends ListenBrainzTask {
 		return { uuids, covers };
 	}
 
-	private buildSearchAttributes(metadata: RecordingMetadata): SearchAttribute[] {
+	private buildSearchAttributes(
+		metadata: RecordingMetadata,
+	): SearchAttribute[] {
 		const attributes: SearchAttribute[] = [];
 
 		if (metadata.isrcs.length > 0) {
-			attributes.push({ key: "isrc", type: "string", value: metadata.isrcs[0]! });
+			attributes.push({
+				key: "isrc",
+				type: "string",
+				value: metadata.isrcs[0]!,
+			});
 		}
 		if (metadata.durationSeconds !== null) {
 			attributes.push({
@@ -263,7 +271,13 @@ abstract class PlaylistSyncTask extends ListenBrainzTask {
 					{ key: "name", type: "string" as const, value: name },
 				]),
 				album: track.releaseName
-					? [{ key: "title", type: "string" as const, value: track.releaseName }]
+					? [
+							{
+								key: "title",
+								type: "string" as const,
+								value: track.releaseName,
+							},
+						]
 					: undefined,
 				attributes: this.buildSearchAttributes(track),
 			});

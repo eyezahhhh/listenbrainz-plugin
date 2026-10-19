@@ -10,9 +10,9 @@ import path from "node:path";
 import { ListenBrainzAttributeSource } from "./listenbrainz.attribute-source.js";
 import { ListenbrainzExternalUrlSource } from "./listenbrainz.external-url-source.js";
 import { PLAYLIST_BOT_ID } from "./const/playlist-bot-id.const.js";
-import type EphemeralImportPlugin from "ephemeral-import/src/main.js";
 import type { ListenBrainzTask } from "./task-base.js";
 import type { ListenBrainzContext } from "./types/task.interface.js";
+import { SublimatePlugin } from "sublimate";
 
 export default class Plugin implements PipeBomb.Plugin {
 	private ctx: PipeBomb.PluginApiContext | null = null;
@@ -88,7 +88,7 @@ export default class Plugin implements PipeBomb.Plugin {
 		}
 
 		const plugin =
-			await this.ctx.getPlugin<EphemeralImportPlugin>("ephemeral-import");
+			await this.ctx.getPlugin<SublimatePlugin>("ephemeral-import");
 		return plugin?.getSearchClient() ?? null;
 	}
 }

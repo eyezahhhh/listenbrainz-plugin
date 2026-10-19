@@ -4,10 +4,10 @@ import type {
 	SavedAttribute,
 	WritablePlaylistClient,
 } from "@pipe-bomb/plugin-sdk";
-import type { SearchClient } from "ephemeral-import/src/search-client.js";
 import type { ListenBrainzApi } from "../api.js";
 import type { ListenBrainzDb } from "../db.js";
 import type { ListenBrainzUserConfig } from "../user-config.js";
+import { SearchClient } from "sublimate";
 
 export interface ListenBrainzContext {
 	api: ListenBrainzApi;
