@@ -27,7 +27,37 @@ export class ListenBrainzDb {
 
 			CREATE INDEX IF NOT EXISTS idx_submitted_recorded
 				ON submitted_listens(user_uuid, date_recorded);
+
+			CREATE TABLE IF NOT EXISTS meta (
+				key   TEXT PRIMARY KEY,
+				value TEXT NOT NULL
+			);
 		`);
+	}
+
+	getMeta(key: string): string | null {
+		const row = this.db
+			.prepare(`SELECT value FROM meta WHERE key = ?`)
+			.get(key) as { value: string } | undefined;
+
+		return row?.value ?? null;
+	}
+
+	setMeta(key: string, value: string): void {
+		this.db
+			.prepare(
+				`INSERT INTO meta (key, value) VALUES (@key, @value)
+				ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+			)
+			.run({ key, value });
+	}
+
+	isPlaylistMappingMigrated(): boolean {
+		return this.getMeta("playlist_mapping_migrated") === "1";
+	}
+
+	markPlaylistMappingMigrated(): void {
+		this.setMeta("playlist_mapping_migrated", "1");
 	}
 
 	upsertUser(userUuid: string, lbUsername: string): void {

@@ -16,9 +16,10 @@
 		"typescript": "^6.0.2"
 	},
 	"dependencies": {
-		"@pipe-bomb/plugin-sdk": "^0.0.8",
+		"@pipe-bomb/plugin-sdk": "^0.6.1",
 		"axios": "^1.20.0",
-		"better-sqlite3": "^12.11.1"
+		"better-sqlite3": "^12.11.1",
+		"sharp": "^0.35.5"
 	},
 	"volta": {
 		"node": "24.15.0"

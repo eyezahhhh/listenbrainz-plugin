@@ -9,6 +9,7 @@ import { ListensTask, PlaylistsTask } from "./sync-task.js";
 import path from "node:path";
 import { ListenBrainzAttributeSource } from "./listenbrainz.attribute-source.js";
 import { ListenbrainzExternalUrlSource } from "./listenbrainz.external-url-source.js";
+import { PLAYLIST_BOT_ID } from "./const/playlist-bot-id.const.js";
 
 export default class Plugin implements PipeBomb.Plugin {
 	private db: ListenBrainzDb | null = null;
@@ -30,7 +31,10 @@ export default class Plugin implements PipeBomb.Plugin {
 
 		const historyClient = ctx.getPlaybackHistoryClient();
 		const dataClient = ctx.getDataClient();
-		const playlistClient = ctx.getPlaylistClient();
+		const playlistClient = ctx.getPlaylistClient({
+			id: PLAYLIST_BOT_ID,
+			name: "ListenBrainz",
+		});
 
 		ctx.registerAttributeSource(new ListenBrainzAttributeSource());
 

@@ -1,18 +1,31 @@
 import type {
+	AttributeValue,
+	AttributeValues,
+	BufferAttributeValue,
 	DataClient,
 	LibraryHandlerId,
 	PlaybackHistoryClient,
 	PlaybackHistoryEntry,
-	PlaylistClient,
 	SavedArtist,
 	SavedAttribute,
+	SavedAttributeValues,
 	SubTask,
 	TaskRunContext,
+	WritablePlaylistClient,
 } from "@pipe-bomb/plugin-sdk";
 import { createHash } from "node:crypto";
 import { type ListenBrainzApi, type ListenPayload } from "./api.js";
 import { type ListenBrainzDb } from "./db.js";
 import { type ListenBrainzUserConfig } from "./user-config.js";
+import {
+	ATTRIBUTE_SOURCE_ID,
+	buildPlaylistAttributes,
+	discoverPlaylistMappings,
+	getPlaylistTitle,
+	migratePlaylistMappings,
+	reconcileOrphans,
+	type ListenBrainzPlaylistType,
+} from "./playlist-mapping.js";
 
 type ListensSubTask = "all" | "new";
 type PlaylistsSubTask = "loved-tracks" | "recommendations";
@@ -59,10 +72,15 @@ async function buildTrackIndex(
 	return index;
 }
 
+interface MbIndexTrack {
+	uuid: string;
+	attributes: SavedAttribute[];
+}
+
 async function buildMbidIndex(
 	dataClient: DataClient,
-): Promise<Map<string, string>> {
-	const mbidToUuid = new Map<string, string>();
+): Promise<Map<string, MbIndexTrack>> {
+	const mbidToUuid = new Map<string, MbIndexTrack>();
 	const libraryIds = dataClient.getLibraryHandlerIds();
 	for (const lib of libraryIds) {
 		await dataClient.forEachTrackId(
@@ -74,7 +92,7 @@ async function buildMbidIndex(
 					lib.libraryId,
 					trackId,
 					{
-						relations: { identities: true },
+						relations: { identities: true, attributes: true },
 					},
 				);
 				if (!track) {
@@ -82,7 +100,10 @@ async function buildMbidIndex(
 				}
 				for (const identity of track.identities ?? []) {
 					if (identity.identityId === "musicbrainz_recording_id") {
-						mbidToUuid.set(identity.identity, track.uuid);
+						mbidToUuid.set(identity.identity, {
+							uuid: track.uuid,
+							attributes: track.attributes ?? [],
+						});
 					}
 				}
 			},
@@ -154,25 +175,31 @@ async function buildListenPayload(
 }
 
 async function upsertPlaylist(
-	playlistClient: PlaylistClient,
+	playlistClient: WritablePlaylistClient,
 	existingUuid: string | null,
 	userUuid: string,
-	title: string,
+	type: ListenBrainzPlaylistType,
 	trackUuids: string[],
+	covers: SavedAttributeValues["buffer"][],
 ): Promise<string> {
+	const title = getPlaylistTitle(type);
+	const attributes = buildPlaylistAttributes(userUuid, type, title, covers);
+
 	let uuid = existingUuid;
 	if (!uuid) {
 		uuid = await playlistClient.createPlaylist({
 			attributes: {
-				sourceId: "listenbrainz",
-				attributes: [{ key: "title", value: title }],
+				sourceId: ATTRIBUTE_SOURCE_ID,
+				attributes,
 			},
 		});
 		await playlistClient.addPlaylistMember(uuid, userUuid, "viewer");
 	} else {
-		await playlistClient.updatePlaylistAttributes(uuid, "listenbrainz", [
-			{ key: "title", value: title },
-		]);
+		await playlistClient.updatePlaylistAttributes(
+			uuid,
+			ATTRIBUTE_SOURCE_ID,
+			attributes,
+		);
 	}
 
 	const playlist = await playlistClient.getPlaylist(uuid, {
@@ -411,13 +438,14 @@ export class ListensTask implements SubTask<ListensSubTask> {
 export class PlaylistsTask implements SubTask<PlaylistsSubTask> {
 	readonly id = "create-playlists";
 	readonly resumable = false;
+	private migrated = false;
 
 	constructor(
 		private readonly api: ListenBrainzApi,
 		private readonly db: ListenBrainzDb,
 		private readonly userConfig: ListenBrainzUserConfig,
 		private readonly dataClient: DataClient,
-		private readonly playlistClient: PlaylistClient,
+		private readonly playlistClient: WritablePlaylistClient,
 	) {}
 
 	getSubTasks(): readonly PlaylistsSubTask[] {
@@ -428,6 +456,8 @@ export class PlaylistsTask implements SubTask<PlaylistsSubTask> {
 		context: TaskRunContext,
 		subTaskId: PlaylistsSubTask,
 	): Promise<void> {
+		await this.ensureMigrated();
+
 		if (subTaskId === "loved-tracks") {
 			await this.runLovedTracks(context);
 		} else if (subTaskId === "recommendations") {
@@ -435,9 +465,21 @@ export class PlaylistsTask implements SubTask<PlaylistsSubTask> {
 		}
 	}
 
+	private async ensureMigrated(): Promise<void> {
+		if (this.migrated) {
+			return;
+		}
+
+		await migratePlaylistMappings(this.db, this.playlistClient);
+		this.migrated = true;
+	}
+
 	private async runLovedTracks(_context: TaskRunContext): Promise<void> {
 		const mbidIndex = await buildMbidIndex(this.dataClient);
 		const users = this.db.getAllUsers();
+		const { mappings, playlists } = await discoverPlaylistMappings(
+			this.playlistClient,
+		);
 
 		for (const user of users) {
 			const token = await this.userConfig.getToken(user.userUuid);
@@ -453,30 +495,47 @@ export class PlaylistsTask implements SubTask<PlaylistsSubTask> {
 			const loved = await this.api.getLovedTracks(user.lbUsername);
 
 			const resolvedUuids: string[] = [];
+			const covers: SavedAttributeValues["buffer"][] = [];
+
 			for (const item of loved) {
-				const trackUuid = mbidIndex.get(item.mbid);
-				if (trackUuid) {
-					resolvedUuids.push(trackUuid);
+				const track = mbidIndex.get(item.mbid);
+				if (track) {
+					resolvedUuids.push(track.uuid);
+					for (const attribute of track.attributes) {
+						if (
+							attribute.key == "front" &&
+							attribute.type == "buffer" &&
+							attribute.values.length
+						) {
+							covers.push(attribute.values[0]!);
+						}
+					}
 				}
 			}
 
-			const newUuid = await upsertPlaylist(
+			await upsertPlaylist(
 				this.playlistClient,
-				user.lovedPlaylist,
+				mappings.get(user.userUuid)?.loved ?? null,
 				user.userUuid,
-				"ListenBrainz Likes",
+				"loved",
 				resolvedUuids,
+				covers,
 			);
-
-			if (user.lovedPlaylist !== newUuid) {
-				this.db.setLovedPlaylist(user.userUuid, newUuid);
-			}
 		}
+
+		await reconcileOrphans(
+			this.playlistClient,
+			playlists,
+			new Set(users.map((user) => user.userUuid)),
+		);
 	}
 
 	private async runRecommendations(_context: TaskRunContext): Promise<void> {
 		const mbidIndex = await buildMbidIndex(this.dataClient);
 		const users = this.db.getAllUsers();
+		const { mappings, playlists } = await discoverPlaylistMappings(
+			this.playlistClient,
+		);
 
 		for (const user of users) {
 			const token = await this.userConfig.getToken(user.userUuid);
@@ -492,24 +551,38 @@ export class PlaylistsTask implements SubTask<PlaylistsSubTask> {
 			const recs = await this.api.getRecommendations(user.lbUsername);
 
 			const resolvedUuids: string[] = [];
+			const covers: SavedAttributeValues["buffer"][] = [];
+
 			for (const item of recs) {
-				const trackUuid = mbidIndex.get(item.mbid);
-				if (trackUuid) {
-					resolvedUuids.push(trackUuid);
+				const track = mbidIndex.get(item.mbid);
+				if (track) {
+					resolvedUuids.push(track.uuid);
+					for (const attribute of track.attributes) {
+						if (
+							attribute.key == "front" &&
+							attribute.type == "buffer" &&
+							attribute.values.length
+						) {
+							covers.push(attribute.values[0]!);
+						}
+					}
 				}
 			}
 
-			const newUuid = await upsertPlaylist(
+			await upsertPlaylist(
 				this.playlistClient,
-				user.recsPlaylist,
+				mappings.get(user.userUuid)?.recommendations ?? null,
 				user.userUuid,
-				"ListenBrainz Recommendations",
+				"recommendations",
 				resolvedUuids,
+				covers,
 			);
-
-			if (user.recsPlaylist !== newUuid) {
-				this.db.setRecsPlaylist(user.userUuid, newUuid);
-			}
 		}
+
+		await reconcileOrphans(
+			this.playlistClient,
+			playlists,
+			new Set(users.map((user) => user.userUuid)),
+		);
 	}
 }

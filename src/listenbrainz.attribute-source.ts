@@ -19,6 +19,21 @@ export class ListenBrainzAttributeSource implements AttributeSource {
 				key: "title",
 				supportsMultiple: false,
 			},
+			{
+				type: "string",
+				key: "pipebomb_user_uuid",
+				supportsMultiple: false,
+			},
+			{
+				type: "string",
+				key: "listenbrainz_playlist_type",
+				supportsMultiple: false,
+			},
+			{
+				type: "buffer",
+				key: "thumb",
+				supportsMultiple: false,
+			},
 		]);
 	}
 
