@@ -64,6 +64,37 @@ export default class Plugin implements PipeBomb.Plugin {
 		ctx.registerTask(listensTask);
 		ctx.registerTask(playlistsTask);
 
+		ctx.registerTask({
+			id: "remove-legacy-playlists",
+			resumable: false,
+			run: async (ctx) => {
+				const playlistUuids =
+					await context.playlistClient.getPublicPlaylistUuids();
+				const playlists = await context.playlistClient.getPlaylists(
+					playlistUuids,
+					{
+						relations: {
+							attributes: true,
+						},
+					},
+				);
+				for (const [index, playlist] of playlists.entries()) {
+					ctx.update(index / playlists.length);
+
+					if (!playlist.owner.isUser && !playlist.owner.addedByPluginId) {
+						for (const attribute of playlist.attributes ?? []) {
+							if (
+								attribute.key == "listenbrainz_playlist_type" &&
+								attribute.pluginId == "listenbrainz"
+							) {
+								await context.playlistClient.deletePlaylist(playlist.uuid);
+							}
+						}
+					}
+				}
+			},
+		});
+
 		ctx.registerExternalUrlSource(new ListenbrainzExternalUrlSource());
 	}
 

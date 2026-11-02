@@ -6,5 +6,6 @@
 	"task.plugin.listenbrainz.create-playlists.name": "Create playlists",
 	"task.plugin.listenbrainz.create-playlists.subtask.loved-tracks.name": "Created loved tracks playlists",
 	"task.plugin.listenbrainz.create-playlists.subtask.recommendations.name": "Created recommendations playlists",
-	"plugin.listenbrainz.user-config.listenbrainz.name": "Authentication"
+	"plugin.listenbrainz.user-config.listenbrainz.name": "Authentication",
+	"task.plugin.listenbrainz.remove-legacy-playlists.name": "Remove legacy playlists"
 }
