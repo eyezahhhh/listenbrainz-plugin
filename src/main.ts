@@ -84,10 +84,14 @@ export default class Plugin implements PipeBomb.Plugin {
 					if (!playlist.owner.isUser && !playlist.owner.addedByPluginId) {
 						for (const attribute of playlist.attributes ?? []) {
 							if (
-								attribute.key == "listenbrainz_playlist_type" &&
-								attribute.pluginId == "listenbrainz"
+								(attribute.key == "listenbrainz_playlist_type" &&
+									attribute.pluginId == "listenbrainz") ||
+								(attribute.key == "title" &&
+									(attribute.values[0] == "ListenBrainz Recommendations" ||
+										attribute.values[0] == "ListenBrainz Likes"))
 							) {
 								await context.playlistClient.deletePlaylist(playlist.uuid);
+								break;
 							}
 						}
 					}
